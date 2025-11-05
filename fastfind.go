@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
@@ -21,13 +22,9 @@ const (
 	ExitOk    ExitCode = 0
 )
 
-func usage(code ExitCode) {
-	f := os.Stdout
-	if code != ExitOk {
-		f = os.Stderr
-	}
-	fmt.Fprintf(f, "usage: %s DIR\n", filepath.Base(os.Args[0]))
-	os.Exit(code)
+func usage() {
+	fmt.Fprintf(os.Stderr, "usage: %s DIR [ -size ]\n", filepath.Base(os.Args[0]))
+	os.Exit(1)
 }
 
 func fail(err error) {
@@ -38,6 +35,7 @@ func fail(err error) {
 type Record struct {
 	Path  string
 	Type  rune
+	Size  int64
 	Error error
 }
 
@@ -89,6 +87,16 @@ func (finder *Finder) walk(ctx context.Context, path string, dir FD) error {
 			}
 		}
 
+		if getSize && record.Type == 'f' {
+			var stat unix.Stat_t
+			err = unix.Fstatat(dir, name, &stat, unix.AT_SYMLINK_NOFOLLOW)
+			if err != nil {
+				record.Error = fmt.Errorf("fstatat failed: %w", err)
+			} else {
+				record.Size = stat.Size
+			}
+		}
+
 		select {
 		case finder.out <- record:
 		case <-ctx.Done():
@@ -118,10 +126,24 @@ func quote(s string) string {
 	return `"` + quote_replacer.Replace(s) + `"`
 }
 
+var getSize bool
+
 func main() {
-	if len(os.Args) != 2 {
-		usage(1)
+
+	flag.BoolVar(&getSize, "size", false, "get sizes")
+	flag.Usage = usage
+	flag.Parse()
+
+	var path string
+	switch len(flag.Args()) {
+	case 0:
+		path = "."
+	case 1:
+		path = flag.Args()[0]
+	default:
+		usage()
 	}
+	path = strings.TrimRight(path, "/")
 
 	// set up a top-level context with ^C handling
 	ctx, cancel := context.WithCancel(context.Background())
@@ -144,8 +166,6 @@ func main() {
 		out:   records,
 	}
 
-	path := strings.TrimRight(os.Args[1], "/")
-
 	root, err := unix.Open(path, unix.O_DIRECTORY, 0)
 	if err != nil {
 		fail(err)
@@ -166,11 +186,23 @@ func main() {
 		if !ok {
 			break
 		}
-		if record.Error != nil {
-			fmt.Printf("%s\t%c\t%s\n", quote(record.Path), record.Type, quote(record.Error.Error()))
+
+		if getSize {
+			if record.Error != nil {
+				fmt.Printf("%s\t%c\t\t%s\n", quote(record.Path), record.Type, quote(record.Error.Error()))
+			} else if record.Type == 'f' {
+				fmt.Printf("%s\t%c\t%d\n", quote(record.Path), record.Type, record.Size)
+			} else {
+				fmt.Printf("%s\t%c\n", quote(record.Path), record.Type)
+			}
 		} else {
-			fmt.Printf("%s\t%c\n", quote(record.Path), record.Type)
+			if record.Error != nil {
+				fmt.Printf("%s\t%c\t%s\n", quote(record.Path), record.Type, quote(record.Error.Error()))
+			} else {
+				fmt.Printf("%s\t%c\n", quote(record.Path), record.Type)
+			}
 		}
+
 	}
 
 	err = g.Wait()

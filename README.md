@@ -41,4 +41,8 @@ Fields:
   *  `S` - socket
   *  `?` - unknown
 
-* Error. If there was an error opening a directory, it will be here.
+* Size.  If `-size` command line option is used, the size of a regular
+  file.
+
+* Error. If there was an error opening a directory, or stating a file, it
+  will be here.

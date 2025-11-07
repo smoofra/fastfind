@@ -2,12 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/csv"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
+	"strconv"
 	"syscall"
 
 	"golang.org/x/sync/errgroup"
@@ -70,15 +71,6 @@ func childPath(base, name string) string {
 	return filepath.Join(base, name)
 }
 
-var quote_replacer *strings.Replacer = strings.NewReplacer(`"`, `\"`, "\n", `\n`, "\t", `\t`, "\r", `\r`, "\\", "\\\\")
-
-func quote(s string) string {
-	if !strings.ContainsAny(s, "\"\n\r\t,") {
-		return s
-	}
-	return `"` + quote_replacer.Replace(s) + `"`
-}
-
 var getSize bool
 
 func main() {
@@ -134,28 +126,58 @@ func main() {
 		close(records)
 	}()
 
+	writer := csv.NewWriter(os.Stdout)
+	defer writer.Flush()
+
+	row := make([]string, 0, 16)
+
+	row = append(row, "Path", "Type")
+	if getSize {
+		row = append(row, "Size")
+	}
+	row = append(row, "Error")
+
+	writer.Write(row)
+	if err != nil {
+		fail(err)
+	}
+
 	for {
 		record, ok := <-records
 		if !ok {
 			break
 		}
 
+		row = row[:0]
+
+		row = append(row, record.Path)
+		row = append(row, string(record.Type))
+
 		if getSize {
-			if record.Error != nil {
-				fmt.Printf("%s\t%c\t\t%s\n", quote(record.Path), record.Type, quote(record.Error.Error()))
-			} else if record.Type == 'f' {
-				fmt.Printf("%s\t%c\t%d\n", quote(record.Path), record.Type, record.Size)
+			if record.Error == nil && record.Type == 'f' {
+				row = append(row, strconv.FormatInt(record.Size, 10))
 			} else {
-				fmt.Printf("%s\t%c\n", quote(record.Path), record.Type)
-			}
-		} else {
-			if record.Error != nil {
-				fmt.Printf("%s\t%c\t%s\n", quote(record.Path), record.Type, quote(record.Error.Error()))
-			} else {
-				fmt.Printf("%s\t%c\n", quote(record.Path), record.Type)
+				row = append(row, "")
 			}
 		}
 
+		if record.Error != nil {
+			row = append(row, record.Error.Error())
+		}
+
+		for len(row) > 1 && row[len(row)-1] == "" {
+			row = row[:len(row)-1]
+		}
+
+		err := writer.Write(row)
+		if err != nil {
+			fail(err)
+		}
+	}
+
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		fail(err)
 	}
 
 	err = g.Wait()

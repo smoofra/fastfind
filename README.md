@@ -24,7 +24,8 @@ $ ./fastfind  .
 Output Format
 -------------
 
-The output format is one file per line, tab separated, with two or three fields.
+The output format is standard CSV.   The first line is a header with column
+names.
 
 Fields:
 

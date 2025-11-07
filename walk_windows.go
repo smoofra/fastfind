@@ -20,7 +20,7 @@ type dirHandle = windows.Handle
 
 const (
 	dirQueryInitialBuffer  = 64 * 1024
-	dirQueryMaxBuffer      = 1 << 20
+	dirQueryMaxBuffer      = 1 << 30
 	fileFullDirectoryClass = 2 // FileFullDirectoryInformation
 	fileInfoHeaderSize     = int(unsafe.Offsetof(fileFullDirInformation{}.FileName))
 )
@@ -83,9 +83,8 @@ func (finder *Finder) walk(ctx context.Context, path string, dir dirHandle) erro
 	}
 
 	for _, entry := range entries {
-		child := childPath(path, entry.name)
 		record := Record{
-			Path: child,
+			Path: childPath(path, entry.name),
 			Type: type2rune(entry.mode),
 		}
 
@@ -97,7 +96,7 @@ func (finder *Finder) walk(ctx context.Context, path string, dir dirHandle) erro
 			}
 		}
 
-		if getSize && record.Type == 'f' {
+		if record.Type == 'f' {
 			record.Size = entry.size
 		}
 
@@ -108,13 +107,13 @@ func (finder *Finder) walk(ctx context.Context, path string, dir dirHandle) erro
 		}
 
 		if record.Type == 'd' && record.Error == nil {
-			childPathCopy := child
+			childPath := record.Path
 			handle := subdir
 			went := finder.group.TryGo(func() error {
-				return finder.walk(ctx, childPathCopy, handle)
+				return finder.walk(ctx, childPath, handle)
 			})
 			if !went {
-				if err := finder.walk(ctx, childPathCopy, handle); err != nil {
+				if err := finder.walk(ctx, childPath, handle); err != nil {
 					return err
 				}
 			}
@@ -158,12 +157,12 @@ func enumerateDirectory(handle dirHandle, path string) ([]dirEntry, error) {
 		offset := 0
 		for offset < len(chunk) {
 			if len(chunk[offset:]) < fileInfoHeaderSize {
-				break
+				return nil, fmt.Errorf("NtQueryDirectoryFile returned truncated data")
 			}
 			info := (*fileFullDirInformation)(unsafe.Pointer(&chunk[offset]))
 			nameBytes := int(info.FileNameLength)
 			if nameBytes < 0 || nameBytes > len(chunk[offset:])-fileInfoHeaderSize {
-				break
+				return nil, fmt.Errorf("NtQueryDirectoryFile returned truncated data")
 			}
 			nameLen := nameBytes / 2
 			nameSlice := unsafe.Slice(&info.FileName[0], nameLen)
@@ -229,7 +228,13 @@ func ntQueryDirectory(handle dirHandle, buffer []byte, restart bool) (uint32, wi
 }
 
 func openRelativeDirectory(parent dirHandle, name string) (dirHandle, error) {
-	return ntCreateRelative(parent, name, windows.FILE_LIST_DIRECTORY|windows.SYNCHRONIZE, windows.FILE_ATTRIBUTE_DIRECTORY, windows.FILE_DIRECTORY_FILE|windows.FILE_SYNCHRONOUS_IO_NONALERT|windows.FILE_OPEN_FOR_BACKUP_INTENT)
+	return ntCreateRelative(
+		parent,
+		name,
+		(windows.FILE_LIST_DIRECTORY | windows.SYNCHRONIZE),
+		windows.FILE_ATTRIBUTE_DIRECTORY,
+		(windows.FILE_DIRECTORY_FILE | windows.FILE_SYNCHRONOUS_IO_NONALERT |
+			windows.FILE_OPEN_FOR_BACKUP_INTENT))
 }
 
 func ntCreateRelative(parent dirHandle, name string, access uint32, attributes uint32, options uint32) (dirHandle, error) {

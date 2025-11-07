@@ -11,11 +11,9 @@ import (
 	"syscall"
 
 	"golang.org/x/sync/errgroup"
-	"golang.org/x/sys/unix"
 )
 
 type ExitCode = int
-type FD = int
 
 const (
 	ExitError ExitCode = 1
@@ -65,56 +63,11 @@ func type2rune(t os.FileMode) rune {
 	}
 }
 
-func (finder *Finder) walk(ctx context.Context, path string, dir FD) error {
-	f := os.NewFile(uintptr(dir), path)
-	defer f.Close()
-	entries, err := f.ReadDir(-1)
-	if err != nil {
-		return fmt.Errorf("ReadDir failed for %s: %w", path, err)
+func childPath(base, name string) string {
+	if base == "." {
+		return "." + string(os.PathSeparator) + name
 	}
-	for _, entry := range entries {
-		name := entry.Name()
-		record := Record{
-			Path: path + "/" + name,
-			Type: type2rune(entry.Type()),
-		}
-
-		var subdir FD
-		if record.Type == 'd' {
-			subdir, err = unix.Openat(dir, name, unix.O_DIRECTORY, 0)
-			if err != nil {
-				record.Error = fmt.Errorf("openat failed: %w", err)
-			}
-		}
-
-		if getSize && record.Type == 'f' {
-			var stat unix.Stat_t
-			err = unix.Fstatat(dir, name, &stat, unix.AT_SYMLINK_NOFOLLOW)
-			if err != nil {
-				record.Error = fmt.Errorf("fstatat failed: %w", err)
-			} else {
-				record.Size = stat.Size
-			}
-		}
-
-		select {
-		case finder.out <- record:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-		if record.Type == 'd' && record.Error == nil {
-			went := finder.group.TryGo(func() error {
-				return finder.walk(ctx, record.Path, subdir)
-			})
-			if !went {
-				err = finder.walk(ctx, record.Path, subdir)
-				if err != nil {
-					return err
-				}
-			}
-		}
-	}
-	return nil
+	return filepath.Join(base, name)
 }
 
 var quote_replacer *strings.Replacer = strings.NewReplacer(`"`, `\"`, "\n", `\n`, "\t", `\t`, "\r", `\r`, "\\", "\\\\")
@@ -143,7 +96,7 @@ func main() {
 	default:
 		usage()
 	}
-	path = strings.TrimRight(path, "/")
+	path = filepath.Clean(path)
 
 	// set up a top-level context with ^C handling
 	ctx, cancel := context.WithCancel(context.Background())
@@ -166,7 +119,7 @@ func main() {
 		out:   records,
 	}
 
-	root, err := unix.Open(path, unix.O_DIRECTORY, 0)
+	root, err := openDirHandle(path)
 	if err != nil {
 		fail(err)
 	}

@@ -16,13 +16,25 @@ func openDirHandle(path string) (dirHandle, error) {
 	return unix.Open(path, unix.O_DIRECTORY, 0)
 }
 
-func (finder *Finder) walk(ctx context.Context, path string, dir dirHandle) error {
+func (finder *Finder) walk(ctx context.Context, path string, dir dirHandle) {
 	f := os.NewFile(uintptr(dir), path)
 	defer f.Close()
 
+	record := Record{
+		Path: path,
+		Type: 'd',
+	}
 	entries, err := f.ReadDir(-1)
 	if err != nil {
-		return fmt.Errorf("ReadDir failed for %s: %w", path, err)
+		record.Error = fmt.Errorf("ReadDir failed: %w", err)
+	}
+	select {
+	case finder.out <- record:
+	case <-ctx.Done():
+		return
+	}
+	if err != nil {
+		return
 	}
 
 	for _, entry := range entries {
@@ -50,25 +62,22 @@ func (finder *Finder) walk(ctx context.Context, path string, dir dirHandle) erro
 			}
 		}
 
-		select {
-		case finder.out <- record:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-
 		if record.Type == 'd' && record.Error == nil {
 			childPath := record.Path
 			handle := subdir
 			went := finder.group.TryGo(func() error {
-				return finder.walk(ctx, childPath, handle)
+				finder.walk(ctx, childPath, handle)
+				return nil
 			})
 			if !went {
-				if err := finder.walk(ctx, childPath, handle); err != nil {
-					return err
-				}
+				finder.walk(ctx, childPath, handle)
+			}
+		} else {
+			select {
+			case finder.out <- record:
+			case <-ctx.Done():
+				return
 			}
 		}
 	}
-
-	return nil
 }

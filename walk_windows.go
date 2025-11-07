@@ -74,12 +74,23 @@ func openDirHandle(path string) (dirHandle, error) {
 	return handle, nil
 }
 
-func (finder *Finder) walk(ctx context.Context, path string, dir dirHandle) error {
+func (finder *Finder) walk(ctx context.Context, path string, dir dirHandle) {
 	defer windows.CloseHandle(dir)
 
 	entries, err := enumerateDirectory(dir, path)
+
+	record := Record{
+		Path:  path,
+		Type:  'd',
+		Error: err,
+	}
+	select {
+	case finder.out <- record:
+	case <-ctx.Done():
+		return
+	}
 	if err != nil {
-		return err
+		return
 	}
 
 	for _, entry := range entries {
@@ -100,27 +111,24 @@ func (finder *Finder) walk(ctx context.Context, path string, dir dirHandle) erro
 			record.Size = entry.size
 		}
 
-		select {
-		case finder.out <- record:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-
 		if record.Type == 'd' && record.Error == nil {
 			childPath := record.Path
 			handle := subdir
 			went := finder.group.TryGo(func() error {
-				return finder.walk(ctx, childPath, handle)
+				finder.walk(ctx, childPath, handle)
+				return nil
 			})
 			if !went {
-				if err := finder.walk(ctx, childPath, handle); err != nil {
-					return err
-				}
+				finder.walk(ctx, childPath, handle)
+			}
+		} else {
+			select {
+			case finder.out <- record:
+			case <-ctx.Done():
+				return
 			}
 		}
 	}
-
-	return nil
 }
 
 func enumerateDirectory(handle dirHandle, path string) ([]dirEntry, error) {
@@ -139,7 +147,7 @@ func enumerateDirectory(handle dirHandle, path string) ([]dirEntry, error) {
 		}
 		if errors.Is(err, errDirBufferTooSmall) {
 			if bufSize >= dirQueryMaxBuffer {
-				return nil, fmt.Errorf("NtQueryDirectoryFile(%s): entry larger than %d bytes", path, bufSize)
+				return nil, fmt.Errorf("NtQueryDirectoryFile: entry larger than %d bytes", bufSize)
 			}
 			bufSize *= 2
 			if bufSize > dirQueryMaxBuffer {
@@ -149,7 +157,7 @@ func enumerateDirectory(handle dirHandle, path string) ([]dirEntry, error) {
 			continue
 		}
 		if err != nil {
-			return nil, fmt.Errorf("NtQueryDirectoryFile(%s) failed: %w", path, err)
+			return nil, fmt.Errorf("NtQueryDirectoryFile failed: %w", err)
 		}
 
 		restart = false

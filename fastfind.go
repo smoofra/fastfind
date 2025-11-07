@@ -117,8 +117,8 @@ func main() {
 	}
 
 	g.Go(func() error {
-		err := finder.walk(ctx, path, root)
-		return err
+		finder.walk(ctx, path, root)
+		return nil
 	})
 
 	go func() {
@@ -142,6 +142,8 @@ func main() {
 		fail(err)
 	}
 
+	ok := true
+
 	for {
 		record, ok := <-records
 		if !ok {
@@ -163,6 +165,7 @@ func main() {
 
 		if record.Error != nil {
 			row = append(row, record.Error.Error())
+			ok = false
 		}
 
 		for len(row) > 1 && row[len(row)-1] == "" {
@@ -185,5 +188,7 @@ func main() {
 		fail(err)
 	}
 
-	os.Exit(ExitOk)
+	if !ok {
+		os.Exit(ExitError)
+	}
 }

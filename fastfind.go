@@ -9,7 +9,9 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -32,15 +34,17 @@ func fail(err error) {
 }
 
 type Record struct {
-	Path  string
-	Type  rune
-	Size  int64
-	Error error
+	Path   string
+	Type   rune
+	Size   int64
+	MTime  time.Time
+	Errors []error
 }
 
 type Finder struct {
 	group *errgroup.Group
 	out   chan<- Record
+	stat  bool
 }
 
 func type2rune(t os.FileMode) rune {
@@ -71,24 +75,18 @@ func childPath(base, name string) string {
 	return filepath.Join(base, name)
 }
 
-var getSize bool
+func joinErrors(errors []error) string {
+	var builder strings.Builder
+	for i, err := range errors {
+		if i != 0 {
+			builder.WriteString("; ")
+		}
+		builder.WriteString(err.Error())
+	}
+	return builder.String()
+}
 
 func main() {
-
-	flag.BoolVar(&getSize, "size", false, "get sizes")
-	flag.Usage = usage
-	flag.Parse()
-
-	var path string
-	switch len(flag.Args()) {
-	case 0:
-		path = "."
-	case 1:
-		path = flag.Args()[0]
-	default:
-		usage()
-	}
-	path = filepath.Clean(path)
 
 	// set up a top-level context with ^C handling
 	ctx, cancel := context.WithCancel(context.Background())
@@ -111,6 +109,21 @@ func main() {
 		out:   records,
 	}
 
+	flag.BoolVar(&finder.stat, "stat", false, "get file metadata")
+	flag.Usage = usage
+	flag.Parse()
+
+	var path string
+	switch len(flag.Args()) {
+	case 0:
+		path = "."
+	case 1:
+		path = flag.Args()[0]
+	default:
+		usage()
+	}
+	path = filepath.Clean(path)
+
 	root, err := openDirHandle(path)
 	if err != nil {
 		fail(err)
@@ -132,8 +145,8 @@ func main() {
 	row := make([]string, 0, 16)
 
 	row = append(row, "Path", "Type")
-	if getSize {
-		row = append(row, "Size")
+	if finder.stat {
+		row = append(row, "Size", "MTime")
 	}
 	row = append(row, "Error")
 
@@ -155,16 +168,21 @@ func main() {
 		row = append(row, record.Path)
 		row = append(row, string(record.Type))
 
-		if getSize {
-			if record.Error == nil && record.Type == 'f' {
+		if finder.stat {
+			if len(record.Errors) == 0 && record.Type == 'f' {
 				row = append(row, strconv.FormatInt(record.Size, 10))
+			} else {
+				row = append(row, "")
+			}
+			if !record.MTime.IsZero() {
+				row = append(row, record.MTime.Format("2006-01-02 15:04:05.999999999 -0700"))
 			} else {
 				row = append(row, "")
 			}
 		}
 
-		if record.Error != nil {
-			row = append(row, record.Error.Error())
+		if len(record.Errors) != 0 {
+			row = append(row, joinErrors(record.Errors))
 			ok = false
 		}
 

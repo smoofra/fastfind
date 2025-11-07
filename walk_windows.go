@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode/utf16"
 	"unsafe"
 
@@ -47,9 +48,10 @@ type fileFullDirInformation struct {
 }
 
 type dirEntry struct {
-	name string
-	mode os.FileMode
-	size int64
+	name  string
+	mode  os.FileMode
+	size  int64
+	mtime time.Time
 }
 
 func openDirHandle(path string) (dirHandle, error) {
@@ -75,14 +77,38 @@ func openDirHandle(path string) (dirHandle, error) {
 }
 
 func (finder *Finder) walk(ctx context.Context, path string, dir dirHandle) {
+	var entry dirEntry
+	var info windows.ByHandleFileInformation
+	err := windows.GetFileInformationByHandle(dir, &info)
+	if err == nil {
+		entry.mtime = filetimeToTime(info.LastWriteTime)
+	} else {
+		record := Record{
+			Path:   path,
+			Type:   'd',
+			Errors: []error{fmt.Errorf("GetFileInformationByHandle failed: %w", err)},
+		}
+		select {
+		case finder.out <- record:
+		case <-ctx.Done():
+			return
+		}
+	}
+
+	finder._walk(ctx, path, dir, entry)
+}
+
+func (finder *Finder) _walk(ctx context.Context, path string, dir dirHandle, entry dirEntry) {
 	defer windows.CloseHandle(dir)
 
-	entries, err := enumerateDirectory(dir, path)
-
+	entries, err := enumerateDirectory(dir)
 	record := Record{
 		Path:  path,
 		Type:  'd',
-		Error: err,
+		MTime: entry.mtime,
+	}
+	if err != nil {
+		record.Errors = append(record.Errors, err)
 	}
 	select {
 	case finder.out <- record:
@@ -95,15 +121,16 @@ func (finder *Finder) walk(ctx context.Context, path string, dir dirHandle) {
 
 	for _, entry := range entries {
 		record := Record{
-			Path: childPath(path, entry.name),
-			Type: type2rune(entry.mode),
+			Path:  childPath(path, entry.name),
+			Type:  type2rune(entry.mode),
+			MTime: entry.mtime,
 		}
 
 		var subdir dirHandle
 		if record.Type == 'd' {
 			subdir, err = openRelativeDirectory(dir, entry.name)
 			if err != nil {
-				record.Error = fmt.Errorf("open child directory failed: %w", err)
+				record.Errors = append(record.Errors, err)
 			}
 		}
 
@@ -111,15 +138,15 @@ func (finder *Finder) walk(ctx context.Context, path string, dir dirHandle) {
 			record.Size = entry.size
 		}
 
-		if record.Type == 'd' && record.Error == nil {
+		if record.Type == 'd' && len(record.Errors) == 0 {
 			childPath := record.Path
 			handle := subdir
 			went := finder.group.TryGo(func() error {
-				finder.walk(ctx, childPath, handle)
+				finder._walk(ctx, childPath, handle, entry)
 				return nil
 			})
 			if !went {
-				finder.walk(ctx, childPath, handle)
+				finder._walk(ctx, childPath, handle, entry)
 			}
 		} else {
 			select {
@@ -131,7 +158,7 @@ func (finder *Finder) walk(ctx context.Context, path string, dir dirHandle) {
 	}
 }
 
-func enumerateDirectory(handle dirHandle, path string) ([]dirEntry, error) {
+func enumerateDirectory(handle dirHandle) ([]dirEntry, error) {
 	bufSize := dirQueryInitialBuffer
 	if bufSize < fileInfoHeaderSize+2 {
 		bufSize = fileInfoHeaderSize + 2
@@ -177,9 +204,10 @@ func enumerateDirectory(handle dirHandle, path string) ([]dirEntry, error) {
 			name := string(utf16.Decode(nameSlice))
 			if name != "." && name != ".." {
 				entries = append(entries, dirEntry{
-					name: name,
-					mode: attributesToMode(info.FileAttributes),
-					size: info.EndOfFile,
+					name:  name,
+					mode:  attributesToMode(info.FileAttributes),
+					size:  info.EndOfFile,
+					mtime: ntFiletimeToTime(info.LastWriteTime),
 				})
 			}
 			if info.NextEntryOffset == 0 {
@@ -277,7 +305,7 @@ func ntCreateRelative(parent dirHandle, name string, access uint32, attributes u
 		0,
 	)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("NtCreateFile failed: %w", err)
 	}
 	return handle, nil
 }
@@ -294,6 +322,26 @@ func attributesToMode(attrs uint32) os.FileMode {
 		mode |= os.ModeDevice
 	}
 	return mode
+}
+
+func filetimeToTime(ft windows.Filetime) time.Time {
+	nsec := ft.Nanoseconds()
+	if nsec <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, nsec)
+}
+
+func ntFiletimeToTime(value int64) time.Time {
+	if value == 0 {
+		return time.Time{}
+	}
+	u := uint64(value)
+	ft := windows.Filetime{
+		LowDateTime:  uint32(u & 0xffffffff),
+		HighDateTime: uint32(u >> 32),
+	}
+	return filetimeToTime(ft)
 }
 
 func nativePath(p string) string {
